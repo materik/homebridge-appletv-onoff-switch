@@ -11,21 +11,17 @@ function AppleTVAccessory(log, config) {
     this.log = log;
     this.name = config.name;
     this.credentials = config.credentials;
-    this.updateRate = 5000;
-    this.retryRate = 2000;
+    this.updateRate = config.pollingInterval || 300;
+    this.retryRate = 2;
     this.skipCheck = false;
+    this.debug = config.debug;
 
     this.services = [];
 
-    this.atvService = new Service.Television(this.name, 'atvService');
+    this.atvService = new Service.Switch(this.name);
     this.atvService.setCharacteristic(Characteristic.ConfiguredName, this.name);
     this.atvService
-        .setCharacteristic(
-            Characteristic.SleepDiscoveryMode,
-            Characteristic.SleepDiscoveryMode.ALWAYS_DISCOVERABLE
-        );
-    this.atvService
-        .getCharacteristic(Characteristic.Active)
+        .getCharacteristic(Characteristic.On)
         .on('set', this.setPowerState.bind(this))
         .on('get', this.getPowerState.bind(this));
 
@@ -40,7 +36,6 @@ AppleTVAccessory.prototype.getServices = function () {
         .setCharacteristic(Characteristic.Manufacturer, "Apple")
         .setCharacteristic(Characteristic.Model, "Apple TV")
         .setCharacteristic(Characteristic.SerialNumber, "ST7FZN1NSXG6")
-        .setCharacteristic(Characteristic.FirmwareRevision, '13.3');
     this.services.push(this.informationService);
     return this.services;
 }
@@ -57,7 +52,7 @@ AppleTVAccessory.prototype.atvConnect = function () {
                 setTimeout(function () {
                     that.log("Trying to reconnect to AppleTV: " + that.name);
                     that.atvConnect();
-                }, that.retryRate);
+                }, that.retryRate * 1000);
             });
             return that.device.openConnection(credentials);
         })
@@ -71,7 +66,7 @@ AppleTVAccessory.prototype.atvConnect = function () {
             setTimeout(function () {
                 that.log("Trying to reconnect to AppleTV: " + that.name);
                 that.atvConnect();
-            }, that.retryRate);
+            }, that.retryRate * 1000);
         });
 }
 
@@ -85,48 +80,56 @@ AppleTVAccessory.prototype.updateStatus = function () {
             that.skipCheck = false;
             that.updateStatus();
         }
-    }, this.updateRate);
+    }, this.updateRate * 1000);
 }
 
 AppleTVAccessory.prototype.checkATVStatus = function () {
     var that = this;
 
     that.device.sendIntroduction().then(function (deviceInfo) {
-            var currentPowerState = deviceInfo.payload.logicalDeviceCount;
+        if (that.debug === true) {
+          that.log(JSON.stringify(deviceInfo, null, '  '));
+        }
 
-            if (currentPowerState >= 1) {
-                that.updatePowerState(true);
-            } else {
-                that.updatePowerState(false);
-            }
-        })
-        .catch(function (error) {
-            that.log("ERROR: " + error.message);
-            that.log("ERROR Code: " + error.code);
-            setTimeout(function () {
-                that.log("Trying to reconnect to AppleTV: " + that.name);
-                that.atvConnect();
-            }, that.retryRate);
-        });
+        var payload = deviceInfo.payload
+
+        // If the Apple TV is not a proxy for AirPlay playback, the logicalDeviceCount determines the state
+        if (payload.logicalDeviceCount > 0 && !payload.isProxyGroupPlayer) {
+            that.updatePowerState(true);
+        // If the Apple TV is a proxy for AirPlay playback, the logicalDeviceCount and the AirPlay state determine the state
+        } else if (payload.logicalDeviceCount > 0 && payload.isProxyGroupPlayer && payload.isAirplayActive) {
+            that.updatePowerState(true);
+        } else if (payload.logicalDeviceCount == 0) {
+            that.updatePowerState(false);
+        }
+    })
+    .catch(function (error) {
+        that.log("ERROR: " + error.message);
+        that.log("ERROR Code: " + error.code);
+        setTimeout(function () {
+            that.log("Trying to reconnect to AppleTV: " + that.name);
+            that.atvConnect();
+        }, that.retryRate * 1000);
+    });
 }
 
 AppleTVAccessory.prototype.getPowerState = function (callback) {
-    callback(null, this.atvService.getCharacteristic(Characteristic.Active).value);
+    callback(null, this.atvService.getCharacteristic(Characteristic.On).value);
 }
 
 AppleTVAccessory.prototype.updatePowerState = function (state) {
-    if (this.atvService.getCharacteristic(Characteristic.Active).value != state) {
-        this.atvService.getCharacteristic(Characteristic.Active).updateValue(state);
+    if (this.atvService.getCharacteristic(Characteristic.On).value != state) {
+        this.atvService.getCharacteristic(Characteristic.On).updateValue(state);
     }
 }
 
 AppleTVAccessory.prototype.setPowerState = function (state, callback) {
     var that = this;
 
-    if(this.atvService.getCharacteristic(Characteristic.Active).value != state) {
+    if(this.atvService.getCharacteristic(Characteristic.On).value != state) {
         if (state) {
             that.device.sendKeyCommand(appletv.AppleTV.Key.Tv).then(function () {
-                that.log("AppleTV: " + that.name + " is turned on");
+                that.log(that.name + " is turned on");
                 that.updatePowerState(state);
                 that.getPowerState(callback);
                 that.skipCheck = true;
@@ -136,33 +139,25 @@ AppleTVAccessory.prototype.setPowerState = function (state, callback) {
                 setTimeout(function () {
                     that.log("Trying to reconnect to AppleTV: " + that.name);
                     that.atvConnect();
-                }, that.retryRate);
+                }, that.retryRate * 1000);
             });
         } else {
-            that.device.sendKeyCommand(appletv.AppleTV.Key.LongTv).then(function () {
-                that.device.sendKeyCommand(appletv.AppleTV.Key.Select).then(function () {
-                    that.log("AppleTV: " + that.name + " is turned off");
-                    that.updatePowerState(state);
-                    that.getPowerState(callback);
-                    that.skipCheck = true;
-                }).catch(function (error) {
-                    that.log("ERROR: " + error.message);
-                    that.log("ERROR Code: " + error.code);
-                    setTimeout(function () {
-                        that.log("Trying to reconnect to AppleTV: " + that.name);
-                        that.atvConnect();
-                    }, that.retryRate);
-                });
+            that.device.sendKeyCommand(appletv.AppleTV.Key.Suspend).then(function () {
+                that.log(that.name + " is turned off");
+                that.updatePowerState(state);
+                that.getPowerState(callback);
+                that.skipCheck = true;
             }).catch(function (error) {
                 that.log("ERROR: " + error.message);
                 that.log("ERROR Code: " + error.code);
                 setTimeout(function () {
                     that.log("Trying to reconnect to AppleTV: " + that.name);
                     that.atvConnect();
-                }, that.retryRate);
+                }, that.retryRate * 1000);
             });
         }
     } else {
         that.getPowerState(callback);
     }
 }
+
